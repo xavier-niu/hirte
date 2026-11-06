@@ -21,7 +21,7 @@ let package = Package(
         .target(name: "TerminalCore", dependencies: ["GhosttyVt"]),
         .target(name: "HerdrKit", dependencies: ["SSHTransport", "TerminalCore"]),
         .testTarget(name: "KeyStoreTests", dependencies: ["KeyStore"]),
-        .testTarget(name: "SSHTransportTests", dependencies: ["SSHTransport"]),
+        .testTarget(name: "SSHTransportTests", dependencies: ["SSHTransport", .product(name: "Citadel", package: "Citadel")]),
         .testTarget(name: "TerminalCoreTests", dependencies: ["TerminalCore"]),
         .testTarget(name: "HerdrKitTests", dependencies: ["HerdrKit", "TerminalCore"]),
     ]

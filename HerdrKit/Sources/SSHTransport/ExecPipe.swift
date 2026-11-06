@@ -39,6 +39,11 @@ public final class ExecPipe: @unchecked Sendable {
             let once = Once(ready)
             lifetime.set(Task {
                 var stderr = Data()
+                // How the command ended, kept out here: `withExec` (Citadel 0.12.1) closes the channel
+                // on its way out and throws if it can't. After a command ended by itself the server
+                // has closed it already, and that `alreadyClosed` would replace the real reason.
+                var ended = false
+                var failure: Error?
                 do {
                     try await client.withExec(command) { inbound, outbound in
                         once.resume(with: .success(outbound))
@@ -50,16 +55,23 @@ public final class ExecPipe: @unchecked Sendable {
                                 }
                             }
                         } catch let failed as SSHClient.CommandFailed {
-                            throw SSHTransportError.commandFailed(
+                            failure = SSHTransportError.commandFailed(
                                 exitCode: failed.exitCode,
                                 stderr: String(decoding: stderr, as: UTF8.self)
                                     .trimmingCharacters(in: .whitespacesAndNewlines))
+                        } catch {
+                            failure = error
                         }
+                        ended = true
                     }
-                    outputContinuation.finish()
                 } catch {
-                    once.resume(with: .failure(error))
-                    outputContinuation.finish(throwing: Task.isCancelled ? CancellationError() : error)
+                    if !ended { failure = error }
+                }
+                if let failure {
+                    once.resume(with: .failure(failure))
+                    outputContinuation.finish(throwing: Task.isCancelled ? CancellationError() : failure)
+                } else {
+                    outputContinuation.finish()
                 }
             })
         }
