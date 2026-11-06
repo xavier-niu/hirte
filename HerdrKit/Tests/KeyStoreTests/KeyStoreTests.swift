@@ -51,6 +51,25 @@ func secureEnclaveKeySigns() throws {
     #expect(info.publicKey.isValidSignature(try key.signature(for: message), for: message))
 }
 
+@Test func passwordsAreKeptPerMachine() throws {
+    let store = PasswordStore(storage: InMemoryKeyStorage())
+    let (one, other) = (UUID(), UUID())
+    #expect(try store.password(for: one) == nil)
+
+    try store.setPassword("pässwörd 🐑", for: one)
+    try store.setPassword("second", for: other)
+    #expect(try store.password(for: one) == "pässwörd 🐑")
+    #expect(try store.password(for: other) == "second")
+
+    try store.setPassword("changed", for: one)
+    #expect(try store.password(for: one) == "changed")
+
+    try store.deletePassword(for: one)
+    #expect(try store.password(for: one) == nil)
+    #expect(try store.password(for: other) == "second")
+    try store.deletePassword(for: one)  // already gone: not an error
+}
+
 #if os(macOS)
 /// Our authorized_keys line and fingerprint must match what ssh-keygen says about it.
 @Test func matchesSSHKeygen() throws {

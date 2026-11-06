@@ -477,6 +477,43 @@ final class DemoTourTests: XCTestCase {
         shot(app, "delete-2-held")
     }
 
+    /// A machine can log in with a password: Save waits for one. Cancelled in the end, so nothing
+    /// stays behind in the Keychain or the list.
+    @MainActor
+    func testPasswordInMachineEditor() throws {
+        let app = XCUIApplication()
+        app.launch()
+        startDemo(app)
+        app.navigationBars.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Demo machine'")).firstMatch.tap()
+        let add = app.buttons["Add Machine…"]
+        XCTAssertTrue(add.waitForExistence(timeout: 5), "the title menu offers Add Machine")
+        add.tap()
+        let host = app.textFields["Host"]
+        XCTAssertTrue(host.waitForExistence(timeout: 5))
+        host.tap()
+        let hint = app.buttons["Continue"]
+        if hint.waitForExistence(timeout: 2) { hint.tap() }
+        host.typeText("server.example.com")
+        let user = app.textFields["User"]
+        user.tap()
+        user.typeText("me")
+        // It starts on a password only when there are no keys.
+        let password = app.secureTextFields["Password"]
+        if !password.exists {
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Log In With'")).firstMatch.tap()
+            app.buttons["Password"].tap()
+        }
+        XCTAssertTrue(password.waitForExistence(timeout: 5), "the password field shows")
+        let save = app.buttons["Save"]
+        XCTAssertFalse(save.isEnabled, "Save waits for a password")
+        shot(app, "password-0-empty")
+        password.tap()
+        password.typeText("not a real password")
+        XCTAssertTrue(save.isEnabled, "a password is enough to save")
+        shot(app, "password-1-typed")
+        app.buttons["Cancel"].tap()
+    }
+
     /// Settings: the font preview, the demo button and About.
     @MainActor
     func testSettings() throws {

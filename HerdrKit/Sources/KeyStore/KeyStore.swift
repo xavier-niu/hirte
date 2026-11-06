@@ -168,6 +168,7 @@ struct StoredKey: Codable {
 /// Persists opaque key records.
 public protocol KeyStorage: Sendable {
     func loadAll() throws -> [Data]
+    func load(account: String) throws -> Data?
     func save(_ data: Data, account: String) throws
     func delete(account: String) throws
 }
@@ -175,9 +176,12 @@ public protocol KeyStorage: Sendable {
 /// Generic-password items in the data protection keychain, never synced off the device.
 public struct KeychainKeyStorage: KeyStorage {
     public let service: String
+    /// Readable only while the device is unlocked, not from its first unlock on.
+    private let whenUnlockedOnly: Bool
 
-    public init(service: String = "hirte.ssh-keys") {
+    public init(service: String = "hirte.ssh-keys", whenUnlockedOnly: Bool = false) {
         self.service = service
+        self.whenUnlockedOnly = whenUnlockedOnly
     }
 
     private var baseQuery: [String: Any] {
@@ -201,6 +205,17 @@ public struct KeychainKeyStorage: KeyStorage {
         return items.compactMap { $0[kSecValueData as String] as? Data }
     }
 
+    public func load(account: String) throws -> Data? {
+        var query = baseQuery
+        query[kSecAttrAccount as String] = account
+        query[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
+        return result as? Data
+    }
+
     public func save(_ data: Data, account: String) throws {
         var query = baseQuery
         query[kSecAttrAccount as String] = account
@@ -208,7 +223,9 @@ public struct KeychainKeyStorage: KeyStorage {
         var status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
             query[kSecValueData as String] = data
-            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            query[kSecAttrAccessible as String] = whenUnlockedOnly
+                ? kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                : kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             status = SecItemAdd(query as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
@@ -232,6 +249,7 @@ public final class InMemoryKeyStorage: KeyStorage, @unchecked Sendable {
     public init() {}
 
     public func loadAll() throws -> [Data] { lock.withLock { Array(items.values) } }
+    public func load(account: String) throws -> Data? { lock.withLock { items[account] } }
     public func save(_ data: Data, account: String) throws { lock.withLock { items[account] = data } }
     public func delete(account: String) throws { lock.withLock { _ = items.removeValue(forKey: account) } }
 }

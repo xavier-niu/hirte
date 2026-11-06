@@ -26,7 +26,8 @@ to jump in when they are.
 - **A real terminal**, powered by [Ghostty](https://ghostty.org)'s libghostty-vt: key bar, hardware
   keyboards, selection, links, scrollback and pinch to zoom
 - **Answer in one tap**: Yes, No, Return or Esc for a blocked agent
-- **Keys in the Secure Enclave**, optionally behind Face ID; host keys checked on every connect
+- **Keys in the Secure Enclave**, optionally behind Face ID, or a password in the Keychain; host keys
+  checked on every connect
 - **Themes**: separate light and dark terminal themes, and a choice of fonts
 
 Unfolded on the iPhone Duo, the terminal list and a terminal sit side by side. It works on every

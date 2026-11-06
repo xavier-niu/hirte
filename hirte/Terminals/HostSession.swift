@@ -37,6 +37,7 @@ final class HostSession {
     private var signingKey: SigningKey?
     private var lastHeard = Date.distantPast
     private let knownHosts: any KnownHostsStore
+    private let passwords: PasswordStore
 
     /// Terminals on screen now (the terminal screen, a peek), counted: both can show one at once.
     private var looking: [String: Int] = [:]
@@ -47,9 +48,13 @@ final class HostSession {
     /// herdr-core sends a heartbeat every 15 s; this much silence means the line is dead.
     private static let silenceLimit: TimeInterval = 40
 
-    init(host: Host, knownHosts: any KnownHostsStore = UserDefaultsKnownHosts()) {
+    init(
+        host: Host, knownHosts: any KnownHostsStore = UserDefaultsKnownHosts(),
+        passwords: PasswordStore = PasswordStore()
+    ) {
         self.host = host
         self.knownHosts = knownHosts
+        self.passwords = passwords
     }
 
     var isActive: Bool { runner != nil }
@@ -196,14 +201,10 @@ final class HostSession {
             coreVersion = await client.hello?.version
             return
         }
-        guard let keyInfo = keys.key(id: host.keyID) else { throw SessionError.noKey }
-        if signingKey == nil {
-            state = .connecting("Unlocking key…")
-            signingKey = try await keys.signingKey(for: keyInfo)
-        }
+        let credential = try await loginCredential(keys: keys)
         state = .connecting(snapshot == nil ? "Connecting to \(host.target.host)…" : "Reconnecting…")
         let ssh = try await SSHConnection.connect(
-            to: host.target, key: signingKey!, knownHosts: knownHosts,
+            to: host.target, credential: credential, knownHosts: knownHosts,
             onUnknownHost: { [weak self] offered in
                 await self?.askToTrust(offered) ?? false
             })
@@ -215,6 +216,21 @@ final class HostSession {
         let hello = await client.hello
         coreName = hello?.core.name
         coreVersion = hello?.version
+    }
+
+    /// The machine's key, unlocked once, or its password, read every time: Retry then picks up one
+    /// just corrected in the editor, which doesn't make a new session.
+    private func loginCredential(keys: KeyLibrary) async throws -> SSHCredential {
+        if host.usesPassword {
+            guard let password = try passwords.password(for: host.id) else { throw SessionError.noPassword }
+            return .password(password)
+        }
+        guard let keyInfo = keys.key(id: host.keyID) else { throw SessionError.noKey }
+        if let signingKey { return .key(signingKey) }
+        state = .connecting("Unlocking key…")
+        let key = try await keys.signingKey(for: keyInfo)
+        signingKey = key
+        return .key(key)
     }
 
     /// Applies events until the stream ends, errors, or goes quiet.
@@ -300,12 +316,14 @@ final class HostSession {
 
     // MARK: Errors
 
-    /// Network trouble is retried; problems a person must fix are not.
-    private static func isRetryable(_ error: Error) -> Bool {
+    /// Network trouble is retried; problems a person must fix are not. Above all a rejected login:
+    /// trying again and again can get the account locked or the address banned.
+    static func isRetryable(_ error: Error) -> Bool {
         switch error {
-        case is SessionError: return error as? SessionError != .noKey
+        case let error as SessionError: return error != .noKey && error != .noPassword
         case SSHTransportError.commandFailed, SSHTransportError.authenticationFailed,
-             SSHTransportError.hostKeyChanged, SSHTransportError.hostKeyRejected:
+             SSHTransportError.passwordRejected, SSHTransportError.hostKeyChanged,
+             SSHTransportError.hostKeyRejected:
             return false
         case HerdrError.rpc, HerdrError.invalidResponse: return false
         default:
@@ -328,12 +346,14 @@ final class HostSession {
 
 enum SessionError: LocalizedError, Equatable {
     case noKey
+    case noPassword
     case connectionLost
     case timedOut
 
     var errorDescription: String? {
         switch self {
         case .noKey: "This machine has no SSH key selected. Edit it and pick one."
+        case .noPassword: "This machine has no saved password. Edit it and enter one."
         case .connectionLost: "The connection was lost."
         case .timedOut: "The machine stopped answering."
         }
