@@ -78,6 +78,19 @@ struct TerminalListView: View {
                 Text("First connection to \(key.host). Its host key fingerprint is\n\n\(key.fingerprint)\n\n"
                     + "Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` on the machine.")
             }
+            .alert("Install herdr-core?", isPresented: .constant(session.pendingInstall)) {
+                Button("Install") { session.answerInstall(true) }
+                Button("Cancel", role: .cancel) { session.answerInstall(false) }
+            } message: {
+                Text(installPrompt)
+            }
+    }
+
+    private var installPrompt: String {
+        let account = session.host.target.username
+        return "\(session.host.name) doesn't have herdr-core, which Hirte needs there. This runs its official "
+            + "installer from releases.herdr.dev as \(account), which puts it in ~/.local/bin."
+            + (account == "root" ? " Terminals there would run as root." : "")
     }
 
     @ViewBuilder

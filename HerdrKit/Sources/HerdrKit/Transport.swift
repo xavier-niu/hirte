@@ -29,6 +29,37 @@ public enum HerdrCore {
 
     public static let notInstalledMessage = "herdr-core is not installed here"
 
+    /// Whether `connectCommand` failed because the machine has no herdr-core, and not because one
+    /// that's there couldn't start, which installing wouldn't fix.
+    public static func isNotInstalled(_ error: Error) -> Bool {
+        guard case SSHTransportError.commandFailed(127, let stderr) = error else { return false }
+        return stderr.contains(notInstalledMessage)
+    }
+
+    /// herdr-core's official installer. It needs no root, and puts herdr-core in `~/.local/bin`,
+    /// where `connectCommand` looks.
+    public static let installerURL = "https://releases.herdr.dev/core/install.sh"
+
+    /// Shell line that runs the installer. Its documented `curl … | sh` succeeds when the download
+    /// fails, since `sh` then has nothing to run, and could run half a script. So this downloads it
+    /// first. It exits with 0 or 1: a 127 from the installer would read as "not installed".
+    public static var installCommand: String {
+        "sh -c 's=$(curl -fsSL \(installerURL)) || { echo \"could not download \(installerURL)\" >&2; exit 1; }; "
+            + "printf \"%s\\n\" \"$s\" | sh || exit 1'"
+    }
+
+    /// Installs herdr-core on that machine, and returns once the installer is done. That runs code
+    /// from the internet there, so only do this after asking.
+    public static func install(on ssh: SSHConnection) async throws {
+        let pipe = try await ssh.openExec(installCommand)
+        defer { pipe.close() }
+        do {
+            for try await _ in pipe.output {}
+        } catch SSHTransportError.commandFailed(_, let stderr) {
+            throw HerdrError.installFailed(stderr)
+        }
+    }
+
     /// Session names are restricted by herdr-core, but stay safe inside the outer single quotes anyway.
     private static func shellQuoteInner(_ value: String) -> String {
         value.filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" || $0 == "." }

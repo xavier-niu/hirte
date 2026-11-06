@@ -227,7 +227,7 @@ struct HostEditor: View {
                 } header: {
                     Text("herdr-core")
                 } footer: {
-                    Text("Leave empty for the default session. herdr-core must be on PATH or in ~/.local/bin on the machine.")
+                    Text("Leave empty for the default session. herdr-core must be on PATH or in ~/.local/bin on the machine. If it isn't, Hirte offers to install it.")
                 }
             }
             .navigationTitle(hosts.hosts.contains { $0.id == host.id } ? "Edit Machine" : "Add Machine")

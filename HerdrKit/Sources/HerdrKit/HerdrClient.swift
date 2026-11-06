@@ -6,12 +6,16 @@ public enum HerdrError: Error, LocalizedError {
     case rpc(code: Int, message: String, kind: String?, hint: String?)
     case connectionClosed
     case invalidResponse(String)
+    /// The installer's own message, or nothing if it gave none.
+    case installFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .rpc(_, let message, _, let hint): [message, hint].compactMap { $0 }.joined(separator: "\n")
         case .connectionClosed: "The connection to herdr-core closed."
         case .invalidResponse(let detail): "Unexpected answer from herdr-core: \(detail)"
+        case .installFailed(let reason):
+            reason.isEmpty ? "Could not install herdr-core." : "Could not install herdr-core: \(reason)"
         }
     }
 }

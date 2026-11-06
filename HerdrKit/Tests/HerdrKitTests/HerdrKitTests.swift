@@ -299,6 +299,70 @@ private let layoutJSON = #"""
     #expect(HerdrCore.connectCommand(session: "scratch").contains("HC_SESSION=scratch exec"))
 }
 
+@Test func notInstalledIsToldApartFromOtherFailures() {
+    let missing = HerdrCore.notInstalledMessage
+    #expect(HerdrCore.isNotInstalled(SSHTransportError.commandFailed(exitCode: 127, stderr: missing)))
+    // A login script can print around it.
+    #expect(HerdrCore.isNotInstalled(SSHTransportError.commandFailed(exitCode: 127, stderr: "Welcome!\n\(missing)")))
+    // One that's there but can't start: installing wouldn't help.
+    #expect(!HerdrCore.isNotInstalled(SSHTransportError.commandFailed(exitCode: 127, stderr: "libc.so: not found")))
+    #expect(!HerdrCore.isNotInstalled(SSHTransportError.commandFailed(exitCode: 1, stderr: missing)))
+    #expect(!HerdrCore.isNotInstalled(HerdrError.connectionClosed))
+}
+
+#if os(macOS)
+/// Runs a command in a real shell that finds only what's in `folder`, its home, and the system's programs.
+private func runInShell(_ command: String, folder: URL) throws -> (status: Int32, stderr: String) {
+    let errors = Pipe()
+    let process = Process()
+    process.executableURL = URL(filePath: "/bin/sh")
+    process.arguments = ["-c", command]
+    process.environment = ["PATH": "\(folder.path):/usr/bin:/bin", "HOME": folder.path]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = errors
+    try process.run()
+    let stderr = errors.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    return (process.terminationStatus, String(decoding: stderr, as: UTF8.self))
+}
+
+private func emptyFolder() throws -> URL {
+    let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    return folder
+}
+
+@Test func connectCommandSaysWhenHerdrCoreIsMissing() throws {
+    let folder = try emptyFolder()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let result = try runInShell(HerdrCore.connectCommand(), folder: folder)
+    #expect(HerdrCore.isNotInstalled(SSHTransportError.commandFailed(exitCode: Int(result.status), stderr: result.stderr)))
+}
+
+/// `installCommand`'s exit status with this as `curl`: what it prints stands in for the installer.
+private func installStatus(curl: String) throws -> Int32 {
+    let folder = try emptyFolder()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let fake = folder.appending(path: "curl")
+    try "#!/bin/sh\n\(curl)\n".write(to: fake, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+    return try runInShell(HerdrCore.installCommand, folder: folder).status
+}
+
+@Test func installCommandReportsHowTheInstallerEnded() throws {
+    #expect(try installStatus(curl: "echo 'exit 0'") == 0)
+    #expect(try installStatus(curl: "echo 'exit 3'") == 1)
+    // Not 127, which would read as "not installed".
+    #expect(try installStatus(curl: "echo 'exit 127'") == 1)
+}
+
+/// With plain `curl … | sh`, these two would count as installed.
+@Test func installCommandFailsWhenTheDownloadFails() throws {
+    #expect(try installStatus(curl: "exit 6") == 1)
+    #expect(try installStatus(curl: "echo 'exit 0'; exit 18") == 1)
+}
+#endif
+
 #if os(macOS)
 private let localCore = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".local/bin/herdr-core")
