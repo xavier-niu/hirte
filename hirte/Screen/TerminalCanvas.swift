@@ -65,7 +65,26 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     private var menuLink: URL?
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private var lastGrid: (cols: Int, rows: Int)?
+    /// The part of a line not scrolled yet, in points, down if positive.
     private var scrollRemainder: CGFloat = 0
+    /// How far the text is drawn off its rows: `scrollRemainder` on whole pixels, in our own
+    /// history. A program's screen only moves by lines, so there it stays 0.
+    private var textOffset: CGFloat = 0 {
+        didSet { if textOffset != oldValue { setNeedsDisplay() } }
+    }
+    /// The line sliding in at the top or bottom while `textOffset` isn't 0.
+    private var edgeLine: (above: Bool, cells: [ScreenCell])?
+    /// How far the current pan had come at its last callback.
+    private var panTravel: CGFloat = 0
+    /// Where the finger last scrolled: where programs get a glide's mouse wheel reports.
+    private var scrollPoint: CGPoint = .zero
+    /// The text coasting after a flick, a `glideLink` frame at a time.
+    private var glide: ScrollGlide?
+    private var glideLink: CADisplayLink?
+    private var glideLastFrame: TimeInterval?
+    private var glideWasScrolledBack = false
+    /// The glide the current touch stopped, and when.
+    private var stoppedGlide: (velocity: Double, time: TimeInterval)?
     private var pinchStartSize: CGFloat = 13
     /// While pinching, the screen as it was, scaled; nothing is re-laid-out until the fingers lift.
     private var pinchSnapshot: UIView?
@@ -271,6 +290,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         if screen.rows > visibleRows, let row = screen.cursor?.y ?? screen.cursorRow, row >= visibleRows {
             origin.y -= CGFloat(row - visibleRows + 1) * drawFonts.cellHeight
         }
+        origin.y += textOffset
         return Geometry(origin: origin, fonts: drawFonts)
     }
 
@@ -321,6 +341,20 @@ final class TerminalCanvasView: UIView, UIKeyInput {
 
         let g = geometry()
         let highlight = UIColor.tintColor.withAlphaComponent(0.4)
+        // Text between rows goes under the edges of where the rows are at rest, so that nothing
+        // appears suddenly in the padding.
+        context.saveGState()
+        if textOffset != 0 {
+            context.clip(to: CGRect(
+                x: 0, y: g.origin.y - textOffset,
+                width: bounds.width, height: CGFloat(screen.lines.count) * g.cellHeight))
+        }
+        if textOffset != 0, let edgeLine {
+            let row = edgeLine.above ? -1 : screen.lines.count
+            let top = g.origin.y + CGFloat(row) * g.cellHeight
+            drawBackgrounds(edgeLine.cells, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, in: context)
+            drawText(edgeLine.cells, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts)
+        }
         for (y, line) in screen.lines.enumerated() {
             let top = g.origin.y + CGFloat(y) * g.cellHeight
             guard top < rect.maxY, top + g.cellHeight > rect.minY else { continue }
@@ -336,9 +370,10 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         if let cursor = screen.cursor, cursor.y < screen.lines.count {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
         }
+        context.restoreGState()
         if watching {
             let cells = CGRect(
-                x: g.origin.x, y: g.origin.y,
+                x: g.origin.x, y: g.origin.y - textOffset,
                 width: CGFloat(screen.cols) * g.cellWidth, height: CGFloat(screen.lines.count) * g.cellHeight)
             UIColor(screen.foreground).withAlphaComponent(0.3).setStroke()
             let outline = UIBezierPath(roundedRect: cells.insetBy(dx: -3, dy: -3), cornerRadius: 4)
@@ -518,8 +553,39 @@ final class TerminalCanvasView: UIView, UIKeyInput {
 
     // MARK: Gestures
 
+    /// A touch stops a glide and holds the text there, as in any list. At the very end of a glide
+    /// the text looks stopped already: that touch counts as an ordinary one.
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if let glide, abs(glide.velocity) >= ScrollGlide.visibleSpeed {
+            stoppedGlide = (velocity: glide.velocity, time: ProcessInfo.processInfo.systemUptime)
+        } else {
+            stoppedGlide = nil
+        }
+        stopGlide()
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        settleOnLine()
+        super.touchesEnded(touches, with: event)
+    }
+
+    /// Also how a tap or long press taking the touch looks from here.
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        settleOnLine()
+        super.touchesCancelled(touches, with: event)
+    }
+
+    /// A touch held the text between two lines and no pan took it from there: on to a line.
+    private func settleOnLine() {
+        guard glide == nil, scrollRemainder != 0, pan?.state != .began, pan?.state != .changed else { return }
+        startGlide(lift: 0)
+    }
+
     @objc private func tapped(_ tap: UITapGestureRecognizer) {
         guard let model else { return }
+        // A tap that stops a glide does only that, as in any list.
+        guard stoppedGlide == nil else { return }
         let point = tap.location(in: self)
         editMenu.dismissMenu()
         switch model.tap(at: cell(at: point)) {
@@ -757,19 +823,140 @@ final class TerminalCanvasView: UIView, UIKeyInput {
 
     @objc private func panned(_ pan: UIPanGestureRecognizer) {
         guard let model else { return }
-        if pan.state == .began {
-            scrollRemainder = 0
+        switch pan.state {
+        case .began:
+            // In our history, on from where a touch may have stopped the text between two lines.
+            if !model.scrollsLocally { scrollRemainder = 0 }
+            // From here on the text follows the finger, without a jump for how far it had to
+            // move for the pan to begin.
+            panTravel = pan.translation(in: self).y
             panStartedLive = !model.scrolledBack
+        case .cancelled:
+            // Cut off, as by a pinch: the rest of its travel isn't scrolled, and nothing glides.
+            endScrolling()
+            return
+        default:
+            break
         }
+        // From the total, not by setting the translation back to zero: that also resets the
+        // velocity, which a glide starts from.
+        let travel = pan.translation(in: self).y
+        scrollPoint = pan.location(in: self)
+        let canContinue = moveText(by: travel - panTravel)
+        panTravel = travel
+        if pan.state == .ended, canContinue { startGlide(lift: pan.velocity(in: self).y) }
+    }
+
+    /// Moves the text by this many points, down if positive: by whole lines, and in our own history
+    /// by what's left of one too, so that it doesn't wait for the next line to move at all. Returns
+    /// whether it can go on that way.
+    private func moveText(by points: CGFloat) -> Bool {
+        guard let model else { return false }
         let cellHeight = geometry().cellHeight
-        let dy = pan.translation(in: self).y + scrollRemainder
+        let dy = points + scrollRemainder
         let lines = Int(dy / cellHeight)
+        scrollRemainder = dy - CGFloat(lines) * cellHeight
+        var canContinue = true
         if lines != 0 {
             // Finger down moves the content down: that is scrolling up (back).
-            let at = cell(at: pan.location(in: self))
-            model.scroll(lines: -lines, column: at.x, row: at.y)
-            scrollRemainder = dy - CGFloat(lines) * cellHeight
-            pan.setTranslation(.zero, in: self)
+            let at = cell(at: scrollPoint)
+            canContinue = model.scroll(lines: -lines, column: at.x, row: at.y)
+        }
+        guard model.scrollsLocally else { return canContinue }
+        if lines != 0 {
+            // Now, not when SwiftUI passes it on: the new offset belongs with these lines.
+            screen = model.frame
+            edgeLine = nil
+        }
+        // Nothing moves past the ends of the history.
+        let direction = scrollRemainder != 0 ? scrollRemainder : points
+        if direction != 0 {
+            guard let bar = screen.scrollbar, direction > 0 ? bar.offset > 0 : !bar.atBottom else {
+                dropTextOffset()
+                return false
+            }
+        }
+        let scale = max(traitCollection.displayScale, 1)
+        textOffset = (scrollRemainder * scale).rounded() / scale
+        // Not while lines go by every frame: reading one takes time, and nobody could see it.
+        if lines == 0, scrollRemainder != 0 {
+            let above = scrollRemainder > 0
+            if edgeLine?.above != above {
+                edgeLine = model.lineNextToScreen(above: above).map { (above: above, cells: $0) }
+                setNeedsDisplay()
+            }
+        }
+        return true
+    }
+
+    private func dropTextOffset() {
+        scrollRemainder = 0
+        textOffset = 0
+        edgeLine = nil
+    }
+
+    /// Gives up on any scrolling, with the text back on its rows at once.
+    private func endScrolling() {
+        stopGlide()
+        dropTextOffset()
+    }
+
+    /// Finishes on the nearest line, which a glide has all but reached by now.
+    private func landOnLine() {
+        guard let model, model.scrollsLocally else { return dropTextOffset() }
+        let lines = Int((scrollRemainder / geometry().cellHeight).rounded())
+        if lines != 0 {
+            let at = cell(at: scrollPoint)
+            _ = model.scroll(lines: -lines, column: at.x, row: at.y)
+            screen = model.frame
+        }
+        dropTextOffset()
+    }
+
+    /// How little of a glide can go unseen: under a pixel or two of our own text moving smoothly,
+    /// half a line of a program's, which only moves by lines.
+    private var glideStopDistance: Double {
+        model?.scrollsLocally == true ? 0.5 : Double(geometry().cellHeight) / 2
+    }
+
+    private func startGlide(lift velocity: CGFloat) {
+        stopGlide()
+        let stopped = stoppedGlide
+        var coasting = ScrollGlide(
+            lift: Double(velocity), interrupted: stopped?.velocity ?? 0,
+            heldFor: stopped.map { ProcessInfo.processInfo.systemUptime - $0.time } ?? 0)
+        if model?.scrollsLocally == true {
+            coasting.land(onMultiplesOf: Double(geometry().cellHeight), from: Double(scrollRemainder))
+        }
+        guard abs(coasting.travelLeft) >= glideStopDistance else { return landOnLine() }
+        glide = coasting
+        glideLastFrame = nil
+        glideWasScrolledBack = model?.scrolledBack ?? false
+        let link = CADisplayLink(target: self, selector: #selector(glideFrame(_:)))
+        link.add(to: .main, forMode: .common)
+        glideLink = link
+    }
+
+    private func stopGlide() {
+        glideLink?.invalidate()
+        glideLink = nil
+        glide = nil
+    }
+
+    @objc private func glideFrame(_ link: CADisplayLink) {
+        guard window != nil, let model, var coasting = glide else { return endScrolling() }
+        // The banner went back to the live screen.
+        if glideWasScrolledBack, !model.scrolledBack { return endScrolling() }
+        let seconds = glideLastFrame.map { link.timestamp - $0 } ?? link.duration
+        glideLastFrame = link.timestamp
+        let travel = coasting.advance(by: seconds)
+        glide = coasting
+        let canContinue = moveText(by: CGFloat(travel))
+        glideWasScrolledBack = model.scrolledBack
+        guard canContinue else { return endScrolling() }
+        if abs(coasting.travelLeft) < glideStopDistance {
+            stopGlide()
+            landOnLine()
         }
     }
 
@@ -800,10 +987,12 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
+        endScrolling()
         model?.type(text)
     }
 
     func deleteBackward() {
+        endScrolling()
         model?.press(.backspace)
     }
 
@@ -831,6 +1020,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     /// Hardware keyboard: special keys and Ctrl/Alt combinations go through the encoder;
     /// plain typing falls through to `insertText`.
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        endScrolling()
         var unhandled = Set<UIPress>()
         for press in presses {
             guard let key = press.key, let model, handle(key, model: model) else {
@@ -908,6 +1098,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
 
     // Key bar actions.
     func keyBarPressed(_ key: TerminalKey, modifiers: KeyModifiers = []) {
+        endScrolling()
         model?.press(key, modifiers: modifiers)
     }
 
@@ -989,6 +1180,66 @@ enum TerminalFont: String, CaseIterable, Identifiable {
     static let storageKey = "terminal.font"
     static let sizeKey = "terminal.fontSize"
     static let defaultSize = 13.0
+}
+
+/// How a list on iOS coasts after a flick, with UIKit's own deceleration: the speed falls by the
+/// same share every millisecond, so the text goes on for about half a second's worth of the speed
+/// it was let go at. A flick the same way as the glide its touch stopped adds to it, which is how
+/// repeated flicks get through a long list. Not a real `UIScrollView`: one in our view hierarchy
+/// could pass for the page's content, which the title bar's look follows.
+struct ScrollGlide {
+    /// `UIScrollView.DecelerationRate.normal`: the share of the speed left after a millisecond.
+    static let decelerationRate = 0.998
+    /// `UIScrollView.DecelerationRate.fast`, for the short way to a line after a slow lift.
+    static let settlingRate = 0.99
+    /// Below this speed, in points per second, the text looks stopped.
+    static let visibleSpeed = 20.0
+    /// How fast a lift must be to add to the glide its touch stopped. A slower one was placing
+    /// the text, and only gets its own small glide.
+    static let flickSpeed = 300.0
+    /// How long a touch can last and still add to the glide it stopped, in seconds. A longer one
+    /// held the text still first.
+    static let carryTime: TimeInterval = 0.4
+    /// So that repeated flicks don't flood a program with wheel reports.
+    static let maxSpeed = 15_000.0
+
+    /// In points per second; positive moves the text down.
+    private(set) var velocity: Double
+    private var rate = ScrollGlide.decelerationRate
+
+    /// The glide after a finger lifts at this velocity. `interrupted` is the velocity of the glide
+    /// its touch stopped, `heldFor` seconds ago.
+    init(lift velocity: Double, interrupted: Double = 0, heldFor: TimeInterval = 0) {
+        var speed = velocity
+        if abs(velocity) >= Self.flickSpeed, velocity * interrupted > 0, heldFor <= Self.carryTime {
+            speed += interrupted
+        }
+        self.velocity = min(max(speed, -Self.maxSpeed), Self.maxSpeed)
+    }
+
+    /// How many seconds' worth of its speed the text still goes on for.
+    private var reach: Double { -1 / (1000 * log(rate)) }
+
+    /// How many points are still to go.
+    var travelLeft: Double { velocity * reach }
+
+    /// Changes course a little to end on a multiple of `step`, the way lists do it with a target
+    /// offset; `offset` is how far past a multiple the text is now. When it wouldn't get as far as
+    /// one step, it's only finding its place: a long slow crawl there would look like lag.
+    mutating func land(onMultiplesOf step: Double, from offset: Double) {
+        let natural = travelLeft
+        if abs(natural) < step { rate = Self.settlingRate }
+        let landing = ((natural + offset) / step).rounded() * step
+        velocity = (landing - offset) / reach
+    }
+
+    /// Moves on by this long and returns how many points that covered, the same at any frame rate.
+    mutating func advance(by seconds: TimeInterval) -> Double {
+        let remaining = pow(rate, 1000 * seconds)
+        let travel = velocity * (remaining - 1) / (1000 * log(rate))
+        velocity *= remaining
+        return travel
+    }
 }
 
 /// Monospaced fonts and the cell size they imply.

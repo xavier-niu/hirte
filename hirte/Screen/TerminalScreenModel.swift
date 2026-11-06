@@ -277,21 +277,41 @@ final class TerminalScreenModel {
     /// A scroll gesture over a cell: to the program (mouse wheel / arrows) or our history.
     /// Watching, only our history scrolls, also under mouse-using programs like coding agents:
     /// sending to the program would take over. (A full-screen program has no history to scroll.)
-    func scroll(lines: Int, column: Int, row: Int) {
-        guard let vt, lines != 0 else { return }
+    /// Returns whether scrolling on that way can do anything: not past an end of our history. A
+    /// program's ends aren't known.
+    func scroll(lines: Int, column: Int, row: Int) -> Bool {
+        guard let vt, lines != 0 else { return false }
         if watching {
-            guard !vt.isAlternateScreen else { return }
+            guard !vt.isAlternateScreen else { return false }
             vt.scroll(by: lines)
-            scrolledBack = true
-            return renderNow()
+            return scrolledLocally(lines)
         }
         switch vt.wheel(lines: lines, column: column, row: row) {
         case .scrolledLocally:
-            scrolledBack = true
-            renderNow()
+            return scrolledLocally(lines)
         case .send(let data):
             send(data)
+            return true
         }
+    }
+
+    private func scrolledLocally(_ lines: Int) -> Bool {
+        renderNow()
+        // Back at the bottom is the live screen again.
+        scrolledBack = frame.scrollbar?.atBottom == false
+        guard let bar = frame.scrollbar else { return false }
+        return lines < 0 ? bar.offset > 0 : !bar.atBottom
+    }
+
+    /// Whether scrolling moves our own history, not a program's screen (see `scroll`).
+    var scrollsLocally: Bool {
+        guard let vt else { return false }
+        return watching ? !vt.isAlternateScreen : vt.wheelScrollsLocally
+    }
+
+    /// The line of our history just above or below what's on screen, if any.
+    func lineNextToScreen(above: Bool) -> [ScreenCell]? {
+        vt?.lineNextToViewport(above: above)
     }
 
     func scroll(toBottom: Bool) {

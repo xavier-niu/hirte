@@ -262,6 +262,16 @@ public final class VirtualTerminal {
         ghostty_terminal_scroll_viewport(terminal, behavior)
     }
 
+    /// The line of history just above or below the viewport, for text drawn between two rows; nil
+    /// at that end. Reads a whole frame, so not something to do for every line going by fast.
+    public func lineNextToViewport(above: Bool) -> [ScreenCell]? {
+        guard let bar = scrollbar(), above ? bar.offset > 0 : !bar.atBottom else { return nil }
+        scroll(by: above ? -1 : 1)
+        defer { scroll(by: above ? 1 : -1) }
+        let lines = frame().lines
+        return above ? lines.first : lines.last
+    }
+
     /// Whether a DEC private mode (`CSI ? n h`) is on.
     public func isPrivateModeEnabled(_ number: UInt16) -> Bool {
         var config = GhosttyTerminalModeConfig(mode: ghostty_mode_new(number, false), value: false)
@@ -442,6 +452,9 @@ public final class VirtualTerminal {
         scroll(by: lines)
         return .scrolledLocally
     }
+
+    /// Whether `wheel` moves our own scrollback, not a program's screen.
+    public var wheelScrollsLocally: Bool { !isMouseTracking && !isAlternateScreen }
 
     /// The program asked for mouse reports (clicks, wheel).
     public var isMouseTracking: Bool {

@@ -69,8 +69,43 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
 @Test func wheelScrollsHistoryInAShell() throws {
     let vt = try VirtualTerminal(cols: 10, rows: 3)
     for i in 1...10 { vt.write(bytes("line \(i)\r\n")) }
+    #expect(vt.wheelScrollsLocally)
     #expect(vt.wheel(lines: -5, column: 0, row: 0) == .scrolledLocally)
     #expect(vt.frame().text.contains("line 5"))
+}
+
+@Test func wheelScrollsLocallyOnlyWithoutAProgramTakingIt() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 3)
+    vt.write(bytes("\u{1b}[?1000h"))
+    #expect(!vt.wheelScrollsLocally)
+    vt.write(bytes("\u{1b}[?1000l\u{1b}[?1049h"))
+    #expect(!vt.wheelScrollsLocally)
+    vt.write(bytes("\u{1b}[?1049l"))
+    #expect(vt.wheelScrollsLocally)
+}
+
+@Test func linesNextToTheViewport() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 3)
+    for i in 1...10 { vt.write(bytes("line \(i)\r\n")) }
+    func text(_ line: [ScreenCell]?) -> String? {
+        line.map { cells in
+            cells.map { $0.text.isEmpty ? " " : $0.text }.joined().trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    vt.scroll(by: -4)  // lines 5 to 7
+    let shown = vt.frame().text
+    #expect(text(vt.lineNextToViewport(above: true)) == "line 4")
+    #expect(text(vt.lineNextToViewport(above: false)) == "line 8")
+    #expect(vt.frame().text == shown)
+
+    vt.scroll(by: -100)  // the top: lines 1 to 3
+    #expect(vt.lineNextToViewport(above: true) == nil)
+    #expect(text(vt.lineNextToViewport(above: false)) == "line 4")
+
+    vt.scroll(by: nil)  // the bottom
+    #expect(vt.lineNextToViewport(above: false) == nil)
+    #expect(text(vt.lineNextToViewport(above: true)) == "line 8")
 }
 
 @Test func wheelSendsArrowsInFullScreenApps() throws {
