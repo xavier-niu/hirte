@@ -524,6 +524,18 @@ public final class VirtualTerminal {
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection)
     }
 
+    /// Moves the end of the selection to a viewport cell. Its start stays on the text it was
+    /// made on, however far the screen has scrolled since. Without a selection, does nothing.
+    public func extendSelection(to end: (x: Int, y: Int)) {
+        var selection = GhosttySelection()
+        selection.size = MemoryLayout<GhosttySelection>.size
+        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS,
+              let ref = gridRef(end)
+        else { return }
+        selection.end = ref
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, &selection)
+    }
+
     /// Selects the word under a viewport cell.
     public func selectWord(at point: (x: Int, y: Int)) {
         guard let ref = gridRef(point) else { return }

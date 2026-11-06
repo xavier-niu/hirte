@@ -337,6 +337,17 @@ final class TerminalScreenModel {
         renderNow()
     }
 
+    /// Moves the selection's end to a cell, first scrolling by `lines` if a drag is held against
+    /// the top or bottom edge. Only our history scrolls, never the program: a wheel event would
+    /// redraw its screen under the selection, which stays on the cells it was made on.
+    func extendSelection(to cell: (x: Int, y: Int), scrolling lines: Int = 0) {
+        guard let vt else { return }
+        if lines != 0 { vt.scroll(by: lines) }
+        vt.extendSelection(to: cell)
+        renderNow()
+        if lines != 0 { scrolledBack = frame.scrollbar?.atBottom == false }
+    }
+
     func clearSelection() {
         guard hasSelection else { return }
         vt?.clearSelection()

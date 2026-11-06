@@ -105,6 +105,34 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
     #expect(vt.selectedText() == nil)
 }
 
+@Test func selectionKeepsItsStartWhenDraggingUpThroughHistory() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 3)
+    for i in 1...10 { vt.write(bytes("line \(i)\r\n")) }
+    vt.select(from: (0, 1), to: (0, 1))  // the "l" of "line 10"
+    vt.scroll(by: -4)
+    #expect(vt.frame().text.contains("line 5"))
+    vt.extendSelection(to: (0, 0))  // the "l" of "line 5": the same row number showed "line 9" before
+    #expect(vt.selectedText() == "line 5\nline 6\nline 7\nline 8\nline 9\nl")
+    #expect(vt.frame().selection == [0...9, 0...9, 0...9])
+}
+
+@Test func selectionKeepsItsStartWhenDraggingDownThroughHistory() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 3)
+    for i in 1...10 { vt.write(bytes("line \(i)\r\n")) }
+    vt.scroll(by: -6)
+    vt.select(from: (5, 0), to: (5, 0))  // the "3" of "line 3"
+    vt.scroll(by: 2)
+    vt.extendSelection(to: (5, 2))  // the "7" of "line 7"
+    #expect(vt.selectedText() == "3\nline 4\nline 5\nline 6\nline 7")
+}
+
+@Test func extendingWithoutASelectionDoesNothing() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 3)
+    vt.write(bytes("hello"))
+    vt.extendSelection(to: (2, 0))
+    #expect(vt.selectedText() == nil)
+}
+
 @Test func framesReportOnlyChangedLines() throws {
     let vt = try VirtualTerminal(cols: 20, rows: 5)
     vt.write(bytes("one\r\ntwo\r\nthree"))

@@ -47,7 +47,18 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     private var fonts = Fonts(size: 13)
     /// Smaller fonts for when another viewer's larger size must fit; rebuilt only when the scale changes.
     private var scaledFonts: Fonts?
+    /// Where a long-press landed, until a drag makes it the selection's start: Ghostty then keeps
+    /// that on its text as the screen scrolls, which a viewport cell wouldn't.
     private var selectionAnchor: (x: Int, y: Int)?
+    /// Runs during a long-press, to scroll while a selection drag is held against an edge.
+    private var selectionScroller: CADisplayLink?
+    private var selectionDragPoint: CGPoint = .zero
+    private var selectionPressY: CGFloat = 0
+    /// Whether the finger has moved up or down since the press. Until then it's only selecting
+    /// a word that happens to be near an edge, or dragging along its line, and nothing scrolls.
+    private var selectionScrollArmed = false
+    /// The part of a line not scrolled yet.
+    private var selectionScrollRemainder: CGFloat = 0
     /// The link a tap landed on, for the edit menu.
     private var menuLink: URL?
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
@@ -520,7 +531,8 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         }
     }
 
-    /// Long-press selects a word; keep dragging to extend; let go for Copy.
+    /// Long-press selects a word; keep dragging to extend, against the top or bottom edge to
+    /// scroll on; let go for Copy.
     @objc private func longPressed(_ press: UILongPressGestureRecognizer) {
         guard let model else { return }
         let point = press.location(in: self)
@@ -530,20 +542,89 @@ final class TerminalCanvasView: UIView, UIKeyInput {
             selectionAnchor = at
             model.selectWord(at: at)
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            startSelectionScroller(at: point)
         case .changed:
-            if let anchor = selectionAnchor {
-                let at = cell(at: point)
-                if at != anchor { model.select(from: anchor, to: at) }
-            }
+            selectionDragPoint = point
+            if abs(point.y - selectionPressY) >= 16 { selectionScrollArmed = true }
+            extendSelection(to: point)
         case .ended:
+            stopSelectionScroller()
             selectionAnchor = nil
             menuLink = nil
             if model.hasSelection {
                 editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
             }
         default:
+            stopSelectionScroller()
             selectionAnchor = nil
         }
+    }
+
+    /// Moves the selection's end under the finger, after scrolling by `lines`.
+    private func extendSelection(to point: CGPoint, scrolling lines: Int = 0) {
+        guard let model else { return }
+        let at = cell(at: point)
+        if let anchor = selectionAnchor {
+            // Still the word from the press, until the finger leaves its cell or the screen moves.
+            guard at != anchor || lines != 0 else { return }
+            selectionAnchor = nil
+            model.select(from: anchor, to: at)
+        }
+        model.extendSelection(to: at, scrolling: lines)
+    }
+
+    private func startSelectionScroller(at point: CGPoint) {
+        selectionDragPoint = point
+        selectionPressY = point.y
+        selectionScrollArmed = false
+        selectionScrollRemainder = 0
+        let scroller = CADisplayLink(target: self, selector: #selector(selectionScrollerFired(_:)))
+        scroller.add(to: .main, forMode: .common)
+        selectionScroller = scroller
+    }
+
+    private func stopSelectionScroller() {
+        selectionScroller?.invalidate()
+        selectionScroller = nil
+    }
+
+    /// Fires on every frame of a long-press: the finger may be holding still at the edge, when
+    /// the gesture reports nothing.
+    @objc private func selectionScrollerFired(_ scroller: CADisplayLink) {
+        guard window != nil else { return stopSelectionScroller() }
+        let speed = selectionScrollSpeed(at: selectionDragPoint.y)
+        guard speed != 0 else {
+            selectionScrollRemainder = 0
+            return
+        }
+        selectionScrollRemainder += speed * CGFloat(scroller.targetTimestamp - scroller.timestamp)
+        let lines = Int(selectionScrollRemainder)
+        guard lines != 0 else { return }
+        selectionScrollRemainder -= CGFloat(lines)
+        extendSelection(to: selectionDragPoint, scrolling: lines)
+    }
+
+    /// How fast a selection drag at this height scrolls, in lines per second (negative is up):
+    /// not at all away from the top and bottom edges, then faster the closer it gets. Also not at
+    /// all with no history that way, as on the alternate screen, which has none.
+    private func selectionScrollSpeed(at y: CGFloat) -> CGFloat {
+        guard selectionScrollArmed, let bar = screen.scrollbar else { return 0 }
+        let g = geometry()
+        let usable = usableRect
+        let top = max(g.origin.y, usable.minY)
+        let bottom = min(g.origin.y + CGFloat(screen.rows) * g.cellHeight, usable.maxY)
+        // A fingertip's worth, but never so much of a short screen that nothing is left to drag in.
+        let zone = min(max(g.cellHeight * 2, 44), (bottom - top) / 4)
+        guard zone > 0 else { return 0 }
+        func speed(depth: CGFloat) -> CGFloat {
+            let depth = min(depth, 1)
+            return 4 + 36 * depth * depth
+        }
+        let intoTop = (top + zone - y) / zone
+        let intoBottom = (y - (bottom - zone)) / zone
+        if intoTop > 0, bar.offset > 0 { return -speed(depth: intoTop) }
+        if intoBottom > 0, !bar.atBottom { return speed(depth: intoBottom) }
+        return 0
     }
 
     /// Zooms in two steps, so pinching stays smooth: while the fingers move, only a snapshot of
