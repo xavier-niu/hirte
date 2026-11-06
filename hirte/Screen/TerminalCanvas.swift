@@ -1205,9 +1205,12 @@ struct ScrollGlide {
     static let settlingRate = 0.99
     /// Below this speed, in points per second, the text looks stopped.
     static let visibleSpeed = 20.0
-    /// How fast a lift must be to add to the glide its touch stopped. A slower one was placing
-    /// the text, and only gets its own small glide.
-    static let flickSpeed = 300.0
+    /// A lift slower than this doesn't glide: it was a small move, and the text stays where it was
+    /// left. Nor does it add to the glide its touch stopped.
+    static let glideStartSpeed = 300.0
+    /// From this speed on, a lift glides in full. In between the glide builds up, so that a little
+    /// more speed never suddenly means many more lines.
+    static let fullGlideSpeed = 800.0
     /// How long a touch can last and still add to the glide it stopped, in seconds. A longer one
     /// held the text still first.
     static let carryTime: TimeInterval = 0.4
@@ -1221,8 +1224,9 @@ struct ScrollGlide {
     /// The glide after a finger lifts at this velocity. `interrupted` is the velocity of the glide
     /// its touch stopped, `heldFor` seconds ago.
     init(lift velocity: Double, interrupted: Double = 0, heldFor: TimeInterval = 0) {
-        var speed = velocity
-        if abs(velocity) >= Self.flickSpeed, velocity * interrupted > 0, heldFor <= Self.carryTime {
+        let strength = (abs(velocity) - Self.glideStartSpeed) / (Self.fullGlideSpeed - Self.glideStartSpeed)
+        var speed = velocity * min(max(strength, 0), 1)
+        if abs(velocity) >= Self.glideStartSpeed, velocity * interrupted > 0, heldFor <= Self.carryTime {
             speed += interrupted
         }
         self.velocity = min(max(speed, -Self.maxSpeed), Self.maxSpeed)

@@ -172,10 +172,35 @@ struct ScrollGlideTests {
         #expect(ScrollGlide(lift: -1000, interrupted: -800, heldFor: 0.1).velocity == -1800)
     }
 
-    @Test func turningAroundHoldingStillOrLiftingSlowlyStartsAfresh() {
+    @Test func turningAroundOrHoldingStillStartsAfresh() {
         #expect(ScrollGlide(lift: -1000, interrupted: 800, heldFor: 0.1).velocity == -1000)
         #expect(ScrollGlide(lift: 1000, interrupted: 800, heldFor: ScrollGlide.carryTime + 0.1).velocity == 1000)
-        #expect(ScrollGlide(lift: 100, interrupted: 2000, heldFor: 0.1).velocity == 100)
+    }
+
+    /// A small move stays where it was left, also when its touch stopped a glide.
+    @Test func aSlowLiftDoesNotGlide() {
+        for lift in [0.0, 50, -100, 299, -299] {
+            #expect(ScrollGlide(lift: lift).velocity == 0, "\(lift)")
+            #expect(ScrollGlide(lift: lift, interrupted: lift < 0 ? -2000 : 2000, heldFor: 0.1).velocity == 0, "\(lift)")
+        }
+    }
+
+    @Test func aFirmFlickGlidesInFull() {
+        for lift in [ScrollGlide.fullGlideSpeed, -ScrollGlide.fullGlideSpeed, 2000, -5000] {
+            #expect(ScrollGlide(lift: lift).velocity == lift, "\(lift)")
+        }
+    }
+
+    /// In between, a little more speed never means suddenly many more lines.
+    @Test func theGlideBuildsUpSmoothly() {
+        #expect(ScrollGlide(lift: 550).velocity == 275)
+        var last = 0.0
+        for lift in stride(from: 300.0, through: 800, by: 5) {
+            let velocity = ScrollGlide(lift: lift).velocity
+            #expect(velocity >= last, "\(lift)")
+            #expect(velocity - last <= 15, "\(lift)")
+            last = velocity
+        }
     }
 
     @Test func repeatedFlicksHaveALimit() {
