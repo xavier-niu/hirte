@@ -117,6 +117,11 @@ public final class VirtualTerminal {
     private var replies = Data()
     /// A cell's size in pixels, for size reports (mode 2048, XTWINOPS); 0 when unknown.
     public var cellPixels: (width: Int, height: Int) = (0, 0)
+    /// Until when the program may write to the clipboard, once: closed by default, or anything a
+    /// program prints could overwrite the phone's clipboard. See `takeClipboardWrite()`.
+    public var clipboardWritesAllowedUntil: ContinuousClock.Instant?
+    /// The last allowed clipboard write since the last `takeClipboardWrite()`.
+    private var clipboardText: String?
 
     public init(cols: Int, rows: Int, scrollbackLines: Int = 10_000) throws {
         self.cols = max(cols, 1)
@@ -141,6 +146,17 @@ public final class VirtualTerminal {
             return true
         }
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SIZE, unsafeBitCast(size, to: UnsafeRawPointer.self))
+        // Returning without a reply denies the write (only OSC 5522 tells the program).
+        let clipboardWrite: GhosttyTerminalClipboardWriteFn = { _, userdata, write in
+            guard let userdata, let write,
+                  Unmanaged<VirtualTerminal>.fromOpaque(userdata).takeUnretainedValue().acceptClipboardWrite(write.pointee)
+            else { return }
+            var reply = GhosttyClipboardWriteReply()
+            reply.size = MemoryLayout<GhosttyClipboardWriteReply>.size
+            reply.result = GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS
+            write.pointee.reply?(write, &reply)
+        }
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, unsafeBitCast(clipboardWrite, to: UnsafeRawPointer.self))
         try check(ghostty_render_state_new(nil, &renderState), "render_state_new")
         try check(ghostty_render_state_row_iterator_new(nil, &rowIterator), "row_iterator_new")
         try check(ghostty_render_state_row_cells_new(nil, &rowCells), "row_cells_new")
@@ -198,6 +214,26 @@ public final class VirtualTerminal {
     public func takeReplies() -> Data {
         defer { replies = Data() }
         return replies
+    }
+
+    /// Text the program copied (OSC 52) while `clipboardWritesAllowedUntil` allowed it, once.
+    public func takeClipboardWrite() -> String? {
+        defer { clipboardText = nil }
+        return clipboardText
+    }
+
+    private func acceptClipboardWrite(_ write: GhosttyClipboardWrite) -> Bool {
+        guard let until = clipboardWritesAllowedUntil, ContinuousClock.now < until,
+              write.location == GHOSTTY_CLIPBOARD_LOCATION_STANDARD
+        else { return false }
+        let text: (GhosttyString) -> String = {
+            String(decoding: UnsafeBufferPointer(start: $0.ptr, count: $0.len), as: UTF8.self)
+        }
+        let contents = UnsafeBufferPointer(start: write.contents, count: write.contents_len)
+        guard let plain = contents.first(where: { text($0.mime).hasPrefix("text/plain") }) else { return false }
+        clipboardText = text(plain.data)
+        clipboardWritesAllowedUntil = nil
+        return true
     }
 
     /// Changes the grid; with mode 2048 on, this queues an in-band size report (`takeReplies()`).
@@ -422,6 +458,37 @@ public final class VirtualTerminal {
         ghostty_mouse_event_set_button(mouseEvent, GHOSTTY_MOUSE_BUTTON_LEFT)
         var out = Data()
         for action in [GHOSTTY_MOUSE_ACTION_PRESS, GHOSTTY_MOUSE_ACTION_RELEASE] {
+            ghostty_mouse_event_set_action(mouseEvent, action)
+            out.append(encodeMouse())
+        }
+        return out
+    }
+
+    /// The program asked for drags (modes 1002, 1003), not just clicks.
+    public var tracksMouseDrags: Bool { isPrivateModeEnabled(1002) || isPrivateModeEnabled(1003) }
+
+    public enum MouseDragStep: Sendable {
+        /// A double click whose second press stays down: selects a word, and drags from it.
+        case press
+        case move
+        case release
+    }
+
+    /// One step of a left-button drag, encoded for a mouse-tracking program; empty if it doesn't
+    /// track the mouse.
+    public func mouseDrag(_ step: MouseDragStep, column: Int, row: Int) -> Data {
+        guard isMouseTracking else { return Data() }
+        prepareMouse()
+        ghostty_mouse_event_set_position(mouseEvent, mousePosition(column: column, row: row))
+        ghostty_mouse_event_set_button(mouseEvent, GHOSTTY_MOUSE_BUTTON_LEFT)
+        let actions: [GhosttyMouseAction] =
+            switch step {
+            case .press: [GHOSTTY_MOUSE_ACTION_PRESS, GHOSTTY_MOUSE_ACTION_RELEASE, GHOSTTY_MOUSE_ACTION_PRESS]
+            case .move: [GHOSTTY_MOUSE_ACTION_MOTION]
+            case .release: [GHOSTTY_MOUSE_ACTION_RELEASE]
+            }
+        var out = Data()
+        for action in actions {
             ghostty_mouse_event_set_action(mouseEvent, action)
             out.append(encodeMouse())
         }

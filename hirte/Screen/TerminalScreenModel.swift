@@ -144,6 +144,7 @@ final class TerminalScreenModel {
             pendingInput.removeAll()
             for try await chunk in attached.output {
                 vt.write(chunk)
+                if let copied = vt.takeClipboardWrite() { UIPasteboard.general.string = copied }
                 // The first paint turns mode 2048 back on, which answers with our size: that's
                 // how a Textual app learns the size we attached with.
                 let replies = vt.takeReplies()
@@ -352,6 +353,23 @@ final class TerminalScreenModel {
         guard hasSelection else { return }
         vt?.clearSelection()
         renderNow()
+    }
+
+    /// Whether a long-press drag goes to the program instead of selecting here. Claude Code's
+    /// fullscreen renderer keeps the conversation to itself, so a selection of ours can't reach
+    /// beyond the cells in view; it selects, scrolls at the edges and copies by itself (seen in
+    /// 2.1.319). Other mouse-using programs keep our selection: many do nothing with a drag, or
+    /// keep what they select to themselves. Watching, sending would take over.
+    var programSelects: Bool {
+        guard !watching, let vt, vt.isAlternateScreen, vt.tracksMouseDrags else { return false }
+        return session?.terminal(address)?.foreground?.name == "claude"
+    }
+
+    func programDrag(_ step: VirtualTerminal.MouseDragStep, at cell: (x: Int, y: Int)) {
+        guard let vt else { return }
+        // Letting go is what copies, as OSC 52 on its way back to us: the one write we let through.
+        if step == .release { vt.clipboardWritesAllowedUntil = ContinuousClock.now.advanced(by: .seconds(5)) }
+        send(vt.mouseDrag(step, column: cell.x, row: cell.y))
     }
 
     /// Copies the selection to the clipboard; returns whether there was anything to copy.

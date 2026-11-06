@@ -155,6 +155,44 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
     print("frame 160x50: full \(full), one changed line \(incremental)")
 }
 
+/// The bytes that made Claude Code 2.1.319's fullscreen renderer select a word, drag, scroll at
+/// the edge and copy, tried against the real thing.
+@Test func mouseDragsSelectByWordThenMoveAndRelease() throws {
+    let vt = try VirtualTerminal(cols: 80, rows: 24)
+    #expect(!vt.tracksMouseDrags)
+    #expect(vt.mouseDrag(.press, column: 10, row: 5).isEmpty)
+    vt.write(bytes("\u{1b}[?1049h\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1003h\u{1b}[?1006h"))
+    #expect(vt.tracksMouseDrags)
+    #expect(vt.mouseDrag(.press, column: 10, row: 5) == bytes("\u{1b}[<0;11;6M\u{1b}[<0;11;6m\u{1b}[<0;11;6M"))
+    #expect(vt.mouseDrag(.move, column: 10, row: 0) == bytes("\u{1b}[<32;11;1M"))
+    #expect(vt.mouseDrag(.release, column: 10, row: 0) == bytes("\u{1b}[<0;11;1m"))
+}
+
+@Test func clicksAloneAreNotDrags() throws {
+    let vt = try VirtualTerminal(cols: 80, rows: 24)
+    vt.write(bytes("\u{1b}[?1000h\u{1b}[?1006h"))
+    #expect(vt.isMouseTracking)
+    #expect(!vt.tracksMouseDrags)
+}
+
+@Test func clipboardWritesOnlyWhileAllowedAndOnlyOnce() throws {
+    let vt = try VirtualTerminal(cols: 20, rows: 3)
+    let copyHello = bytes("\u{1b}]52;c;aGVsbG8=\u{7}")
+    vt.write(copyHello)
+    #expect(vt.takeClipboardWrite() == nil)
+
+    vt.clipboardWritesAllowedUntil = ContinuousClock.now.advanced(by: .seconds(5))
+    vt.write(copyHello)
+    #expect(vt.takeClipboardWrite() == "hello")
+    #expect(vt.takeClipboardWrite() == nil)
+    vt.write(copyHello)
+    #expect(vt.takeClipboardWrite() == nil)
+
+    vt.clipboardWritesAllowedUntil = ContinuousClock.now.advanced(by: .seconds(-1))
+    vt.write(copyHello)
+    #expect(vt.takeClipboardWrite() == nil)
+}
+
 @Test func clicksOnlyReachMouseTrackingPrograms() throws {
     let vt = try VirtualTerminal(cols: 10, rows: 3)
     #expect(vt.click(column: 1, row: 1) == nil)

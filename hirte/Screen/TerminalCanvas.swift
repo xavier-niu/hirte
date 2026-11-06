@@ -59,6 +59,8 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     private var selectionScrollArmed = false
     /// The part of a line not scrolled yet.
     private var selectionScrollRemainder: CGFloat = 0
+    /// The cell last reported while a long-press drag goes to the program (`programSelects`).
+    private var programDragCell: (x: Int, y: Int)?
     /// The link a tap landed on, for the edit menu.
     private var menuLink: URL?
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
@@ -536,6 +538,9 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     @objc private func longPressed(_ press: UILongPressGestureRecognizer) {
         guard let model else { return }
         let point = press.location(in: self)
+        if programDragCell != nil || (press.state == .began && model.programSelects) {
+            return forwardDrag(press.state, at: point, to: model)
+        }
         switch press.state {
         case .began:
             let at = cell(at: point)
@@ -557,6 +562,34 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         default:
             stopSelectionScroller()
             selectionAnchor = nil
+        }
+    }
+
+    /// The same gesture for a program that selects text itself: it gets the drag as mouse events,
+    /// scrolls at the edges and copies on release, so there's no selection or menu of ours.
+    private func forwardDrag(_ state: UIGestureRecognizer.State, at point: CGPoint, to model: TerminalScreenModel) {
+        switch state {
+        case .began:
+            let at = cell(at: point)
+            programDragCell = at
+            selectionPressY = point.y
+            selectionScrollArmed = false
+            model.clearSelection()
+            model.programDrag(.press, at: at)
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        case .changed:
+            if abs(point.y - selectionPressY) >= 16 { selectionScrollArmed = true }
+            var at = cell(at: point)
+            // Claude Code scrolls up only with the pointer on the very top row (2.1.319: not on
+            // the next one), which a fingertip can hardly hit: the row below it counts too.
+            if selectionScrollArmed, at.y <= 1 { at.y = 0 }
+            guard let last = programDragCell, at != last else { return }
+            programDragCell = at
+            model.programDrag(.move, at: at)
+        default:
+            // Also when cancelled, or the program would stay in its drag.
+            if let last = programDragCell { model.programDrag(.release, at: last) }
+            programDragCell = nil
         }
     }
 
