@@ -19,6 +19,8 @@ final class TerminalScreenModel {
     private(set) var frame: ScreenFrame = .empty
     /// Soft-keyboard Ctrl: applies to the next key.
     var controlLatched = false
+    /// Soft-keyboard Shift: applies to the next key.
+    var shiftLatched = false
     /// Scrolled up into history (new output does not move the view).
     private(set) var scrolledBack = false
     /// Whether the software keyboard should be up; the canvas keeps it in sync.
@@ -209,7 +211,10 @@ final class TerminalScreenModel {
             press(c == " " ? .space : .letter(c), modifiers: .control, text: nil)
             return
         }
-        send(Data(text.utf8))
+        // Like the keyboard's own Shift: the next letter is a capital.
+        let shifted = shiftLatched && text.count == 1
+        shiftLatched = false
+        send(Data((shifted ? text.uppercased() : text).utf8))
     }
 
     func press(_ key: TerminalKey, modifiers: KeyModifiers = [], text: String? = nil) {
@@ -219,7 +224,17 @@ final class TerminalScreenModel {
             modifiers.insert(.control)
             controlLatched = false
         }
+        if shiftLatched {
+            modifiers.insert(.shift)
+            shiftLatched = false
+        }
         send(vt.encode(key, modifiers: modifiers, text: text))
+    }
+
+    /// The key bar's ^C: an interrupt, also when Shift was left on, which would make it another key.
+    func pressInterrupt() {
+        shiftLatched = false
+        press(.letter("c"), modifiers: .control)
     }
 
     func paste(_ text: String) {

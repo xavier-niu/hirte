@@ -57,6 +57,17 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
     #expect(vt.encode(.up) == bytes("\u{1b}OA"))
 }
 
+/// What the key bar's Shift sends with the keys beside it. Codex takes Shift+Right.
+@Test func shiftedKeys() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 2)
+    #expect(vt.encode(.right, modifiers: .shift) == bytes("\u{1b}[1;2C"))
+    #expect(vt.encode(.left, modifiers: .shift) == bytes("\u{1b}[1;2D"))
+    #expect(vt.encode(.tab, modifiers: .shift) == bytes("\u{1b}[Z"))
+    // Also in application cursor mode, where full-screen programs like that run.
+    vt.write(bytes("\u{1b}[?1h"))
+    #expect(vt.encode(.right, modifiers: .shift) == bytes("\u{1b}[1;2C"))
+}
+
 @Test func tracksBracketedPasteMode() throws {
     let vt = try VirtualTerminal(cols: 10, rows: 2)
     #expect(!vt.bracketedPaste)

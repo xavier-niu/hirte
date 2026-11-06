@@ -1118,8 +1118,18 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         keyBar.controlOn = model?.controlLatched ?? false
     }
 
+    func keyBarToggleShift() {
+        model?.shiftLatched.toggle()
+        keyBar.shiftOn = model?.shiftLatched ?? false
+    }
+
+    func keyBarInterrupt() {
+        model?.pressInterrupt()
+    }
+
     func refreshKeyBar() {
         keyBar.controlOn = model?.controlLatched ?? false
+        keyBar.shiftOn = model?.shiftLatched ?? false
     }
 }
 
@@ -1313,13 +1323,21 @@ extension UIColor {
     }
 }
 
-/// Keys a phone keyboard lacks, shown above it.
+/// Keys a phone keyboard lacks, shown above it. There are more than fit on a narrow phone, so they
+/// scroll sideways, while the key that hides the keyboard stays in reach.
 final class KeyBar: UIInputView {
     private weak var target: TerminalCanvasView?
     private var controlButton: UIButton!
+    private var shiftButton: UIButton!
+    private var keysLeading: NSLayoutConstraint!
+    private var keysMinimumWidth: NSLayoutConstraint!
 
     var controlOn = false {
         didSet { controlButton.isSelected = controlOn }
+    }
+
+    var shiftOn = false {
+        didSet { shiftButton.isSelected = shiftOn }
     }
 
     init(target: TerminalCanvasView) {
@@ -1327,24 +1345,10 @@ final class KeyBar: UIInputView {
         super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 48), inputViewStyle: .keyboard)
         allowsSelfSizing = true
 
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.spacing = 6
-        stack.distribution = .fillEqually
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 6),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-            heightAnchor.constraint(equalToConstant: 48),
-        ])
-
         func button(_ title: String, symbol: String? = nil, label: String, action: @escaping () -> Void) -> UIButton {
             var config = UIButton.Configuration.gray()
             config.cornerStyle = .medium
-            // Eleven keys share the width: small insets, and one line ("ctrl" must not wrap).
+            // Small insets, and one line ("shift" must not wrap).
             config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 2, bottom: 4, trailing: 2)
             config.titleLineBreakMode = .byClipping
             config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -1362,33 +1366,107 @@ final class KeyBar: UIInputView {
             return button
         }
 
-        stack.addArrangedSubview(button("esc", label: "Escape") { [weak self] in self?.target?.keyBarPressed(.escape) })
-        stack.addArrangedSubview(button("tab", label: "Tab") { [weak self] in self?.target?.keyBarPressed(.tab) })
-        controlButton = button("ctrl", label: "Control") { [weak self] in self?.target?.keyBarToggleControl() }
-        controlButton.configurationUpdateHandler = { button in
-            var config = button.configuration
-            config?.baseBackgroundColor = button.isSelected ? .tintColor : nil
-            config?.baseForegroundColor = button.isSelected ? .white : nil
-            button.configuration = config
+        /// Lights up while it applies to the next key.
+        func latch(_ key: UIButton) -> UIButton {
+            key.configurationUpdateHandler = { button in
+                var config = button.configuration
+                config?.baseBackgroundColor = button.isSelected ? .tintColor : nil
+                config?.baseForegroundColor = button.isSelected ? .white : nil
+                button.configuration = config
+            }
+            return key
         }
-        stack.addArrangedSubview(controlButton)
-        stack.addArrangedSubview(button("^C", label: "Control C") { [weak self] in
-            self?.target?.keyBarPressed(.letter("c"), modifiers: .control)
-        })
+
+        controlButton = latch(button("ctrl", label: "Control") { [weak self] in self?.target?.keyBarToggleControl() })
+        shiftButton = latch(button("shift", label: "Shift") { [weak self] in self?.target?.keyBarToggleShift() })
+
+        let keys = UIStackView(arrangedSubviews: [
+            button("esc", label: "Escape") { [weak self] in self?.target?.keyBarPressed(.escape) },
+            button("tab", label: "Tab") { [weak self] in self?.target?.keyBarPressed(.tab) },
+            controlButton!,
+            shiftButton!,
+            button("^C", label: "Control C") { [weak self] in self?.target?.keyBarInterrupt() },
+        ])
         for (symbol, key, label) in [
             ("arrow.left", TerminalKey.left, "Left"), ("arrow.down", .down, "Down"),
             ("arrow.up", .up, "Up"), ("arrow.right", .right, "Right"),
         ] {
-            stack.addArrangedSubview(button("", symbol: symbol, label: label) { [weak self] in
+            keys.addArrangedSubview(button("", symbol: symbol, label: label) { [weak self] in
                 self?.target?.keyBarPressed(key)
             })
         }
-        stack.addArrangedSubview(button("", symbol: "keyboard.chevron.compact.down", label: "Hide keyboard") {
+        keys.axis = .horizontal
+        keys.spacing = 6
+        keys.distribution = .fillEqually
+        keys.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroller = KeyScroller()
+        scroller.accessibilityIdentifier = "key-bar"
+        scroller.translatesAutoresizingMaskIntoConstraints = false
+        scroller.addSubview(keys)
+        addSubview(scroller)
+
+        let hide = button("", symbol: "keyboard.chevron.compact.down", label: "Hide keyboard") {
             [weak self] in _ = self?.target?.resignFirstResponder()
+        }
+        hide.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hide)
+
+        // Set in `layoutSubviews`.
+        keysLeading = keys.leadingAnchor.constraint(equalTo: scroller.contentLayoutGuide.leadingAnchor)
+        // Where they all fit, they share the width and nothing scrolls.
+        keysMinimumWidth = keys.widthAnchor.constraint(greaterThanOrEqualTo: scroller.frameLayoutGuide.widthAnchor)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 48),
+            scroller.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroller.trailingAnchor.constraint(equalTo: hide.leadingAnchor, constant: -6),
+            scroller.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+            scroller.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            hide.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
+            hide.topAnchor.constraint(equalTo: scroller.topAnchor),
+            hide.bottomAnchor.constraint(equalTo: scroller.bottomAnchor),
+            hide.widthAnchor.constraint(equalTo: keys.arrangedSubviews[0].widthAnchor),
+            keysLeading!,
+            keysMinimumWidth!,
+            keys.trailingAnchor.constraint(equalTo: scroller.contentLayoutGuide.trailingAnchor),
+            keys.topAnchor.constraint(equalTo: scroller.contentLayoutGuide.topAnchor),
+            keys.bottomAnchor.constraint(equalTo: scroller.contentLayoutGuide.bottomAnchor),
+            keys.heightAnchor.constraint(equalTo: scroller.frameLayoutGuide.heightAnchor),
+        ])
+        NSLayoutConstraint.activate(keys.arrangedSubviews.map {
+            $0.widthAnchor.constraint(greaterThanOrEqualToConstant: 44)
         })
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // The keys start at the margin, but slide all the way to the screen's edge.
+        let margin = layoutMarginsGuide.layoutFrame.minX
+        guard keysLeading.constant != margin else { return }
+        keysLeading.constant = margin
+        keysMinimumWidth.constant = -margin
+    }
+}
+
+/// Scrolls the key bar's keys, also from a drag that starts on one, which is nearly all of them.
+private final class KeyScroller: UIScrollView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        // Keys light up at once. A drag still takes the touch back: see below.
+        delaysContentTouches = false
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        // A tap on the status bar isn't meant for this.
+        scrollsToTop = false
+        contentInsetAdjustmentBehavior = .never
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// By default, a touch on a control stays with it and the drag doesn't scroll.
+    override func touchesShouldCancel(in view: UIView) -> Bool { true }
 }
 
 /// SwiftUI wrapper.
