@@ -25,10 +25,13 @@ final class HostSession {
 
     /// Set while the user must decide whether to trust an unknown host key.
     private(set) var pendingHostKey: HostKey?
+    /// Set while the user must decide whether to install herdr-core on this machine.
+    private(set) var pendingInstall = false
     /// A terminal to open watching this once (the list's "Watch"), whatever the eye button
     /// remembers; the terminal screen takes it when it opens it.
     var watchNext: String?
     private var hostKeyDecision: CheckedContinuation<Bool, Never>?
+    private var installDecision: CheckedContinuation<Bool, Never>?
 
     private var runner: Task<Void, Never>?
     private var ssh: SSHConnection?
@@ -160,6 +163,7 @@ final class HostSession {
         runner = nil
         if forgetKey { signingKey = nil }
         answerHostKey(trust: false)
+        answerInstall(false)
         Task { await teardown() }
         if case .failed = state {} else { state = .idle }
     }
@@ -211,7 +215,7 @@ final class HostSession {
         self.ssh = ssh
 
         state = .connecting("Starting herdr-core…")
-        let client = try await HerdrClient.connect(ssh: ssh, session: host.session)
+        let client = try await startCore(on: ssh)
         self.client = client
         let hello = await client.hello
         coreName = hello?.core.name
@@ -314,6 +318,37 @@ final class HostSession {
         hostKeyDecision = nil
     }
 
+    // MARK: Installing herdr-core
+
+    /// Starts herdr-core there. If the machine doesn't have it, offers to install it first. That
+    /// runs code from the internet on someone's machine, so it never happens without a yes.
+    private func startCore(on ssh: SSHConnection) async throws -> HerdrClient {
+        do {
+            return try await HerdrClient.connect(ssh: ssh, session: host.session)
+        } catch let error where HerdrCore.isNotInstalled(error) {
+            guard await askToInstall() else { throw error }
+            state = .connecting("Installing herdr-core…")
+            try await HerdrCore.install(on: ssh)
+            // A cancelled install just ends its output, like one that's done.
+            try Task.checkCancellation()
+            state = .connecting("Starting herdr-core…")
+            return try await HerdrClient.connect(ssh: ssh, session: host.session)
+        }
+    }
+
+    private func askToInstall() async -> Bool {
+        await withCheckedContinuation { continuation in
+            installDecision = continuation
+            pendingInstall = true
+        }
+    }
+
+    func answerInstall(_ install: Bool) {
+        pendingInstall = false
+        installDecision?.resume(returning: install)
+        installDecision = nil
+    }
+
     // MARK: Errors
 
     /// Network trouble is retried; problems a person must fix are not. Above all a rejected login:
@@ -325,7 +360,7 @@ final class HostSession {
              SSHTransportError.passwordRejected, SSHTransportError.hostKeyChanged,
              SSHTransportError.hostKeyRejected:
             return false
-        case HerdrError.rpc, HerdrError.invalidResponse: return false
+        case HerdrError.rpc, HerdrError.invalidResponse, HerdrError.installFailed: return false
         default:
             // Face ID cancelled, key missing, ... come from LocalAuthentication / CryptoKit.
             let domain = (error as NSError).domain
