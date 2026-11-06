@@ -987,6 +987,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
+        markedText = nil
         endScrolling()
         model?.type(text)
     }
@@ -1003,6 +1004,8 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     var smartQuotesType: UITextSmartQuotesType { get { .no } set {} }
     var smartDashesType: UITextSmartDashesType { get { .no } set {} }
     var smartInsertDeleteType: UITextSmartInsertDeleteType { get { .no } set {} }
+    var inlinePredictionType: UITextInlinePredictionType { get { .no } set {} }
+    var writingToolsBehavior: UIWritingToolsBehavior { get { .none } set {} }
     var keyboardType: UIKeyboardType { get { .asciiCapable } set {} }
     /// Follows the terminal theme's brightness.
     var darkKeyboard = true {
@@ -1016,6 +1019,14 @@ final class TerminalCanvasView: UIView, UIKeyInput {
 
     private lazy var keyBar = KeyBar(target: self)
     override var inputAccessoryView: UIView? { keyBar }
+
+    // For `UITextInput`, in the extension below.
+    /// What a keyboard is composing (pinyin, say), until it commits it.
+    private var markedText: String?
+    private let markedRange = UITextRange()
+    private let selectedRange = UITextRange()
+    weak var inputDelegate: UITextInputDelegate?
+    lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
 
     /// Hardware keyboard: special keys and Ctrl/Alt combinations go through the encoder;
     /// plain typing falls through to `insertText`.
@@ -1435,6 +1446,62 @@ private final class PaddedLabel: UILabel {
         let fit = super.sizeThatFits(size)
         return CGSize(width: fit.width + insets.left + insets.right, height: fit.height + insets.top + insets.bottom)
     }
+}
+
+/// Barely a `UITextInput`, for the system keyboard's delete key: held down, a plain `UIKeyInput`
+/// gets one `deleteBackward`, and only this repeats it. There's no document behind it, since text
+/// goes straight to the program, which alone knows the line, so positions and ranges lead nowhere.
+/// iSH got repeating delete from the same change (ish-app/ish#465). Blink reports iOS slowing the
+/// repeat after about 20 deletes, when it would move on to whole words (blinksh/blink#1466).
+extension TerminalCanvasView: UITextInput {
+    func text(in range: UITextRange) -> String? {
+        if range === markedRange { return markedText }
+        return range === selectedRange ? "" : nil
+    }
+
+    func replace(_ range: UITextRange, withText text: String) {}
+
+    var selectedTextRange: UITextRange? {
+        get { selectedRange }
+        set {}
+    }
+
+    var markedTextRange: UITextRange? { markedText == nil ? nil : markedRange }
+
+    var markedTextStyle: [NSAttributedString.Key: Any]? {
+        get { nil }
+        set {}
+    }
+
+    func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        self.markedText = markedText
+    }
+
+    func unmarkText() {
+        if let markedText { insertText(markedText) }
+    }
+
+    // Without these, iOS puts spaces in front of every dictation result (seen in iSH).
+    var insertDictationResultPlaceholder: Any { "" }
+    func removeDictationResultPlaceholder(_ placeholder: Any, willInsertResult: Bool) {}
+
+    var beginningOfDocument: UITextPosition { UITextPosition() }
+    var endOfDocument: UITextPosition { UITextPosition() }
+    func textRange(from fromPosition: UITextPosition, to toPosition: UITextPosition) -> UITextRange? { nil }
+    func position(from position: UITextPosition, offset: Int) -> UITextPosition? { nil }
+    func position(from position: UITextPosition, in direction: UITextLayoutDirection, offset: Int) -> UITextPosition? { nil }
+    func compare(_ position: UITextPosition, to other: UITextPosition) -> ComparisonResult { .orderedSame }
+    func offset(from: UITextPosition, to toPosition: UITextPosition) -> Int { 0 }
+    func position(within range: UITextRange, farthestIn direction: UITextLayoutDirection) -> UITextPosition? { nil }
+    func characterRange(byExtending position: UITextPosition, in direction: UITextLayoutDirection) -> UITextRange? { nil }
+    func baseWritingDirection(for position: UITextPosition, in direction: UITextStorageDirection) -> NSWritingDirection { .leftToRight }
+    func setBaseWritingDirection(_ writingDirection: NSWritingDirection, for range: UITextRange) {}
+    func firstRect(for range: UITextRange) -> CGRect { .zero }
+    func caretRect(for position: UITextPosition) -> CGRect { .zero }
+    func selectionRects(for range: UITextRange) -> [UITextSelectionRect] { [] }
+    func closestPosition(to point: CGPoint) -> UITextPosition? { nil }
+    func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { nil }
+    func characterRange(at point: CGPoint) -> UITextRange? { nil }
 }
 
 extension TerminalCanvasView: UIGestureRecognizerDelegate {

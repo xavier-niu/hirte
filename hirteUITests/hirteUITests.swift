@@ -451,6 +451,32 @@ final class DemoTourTests: XCTestCase {
         shot(app, "switcher-2-manage")
     }
 
+    /// Holding the system keyboard's delete key keeps deleting, past spaces too. The screen's text
+    /// can't be read from here, so this can't fail for it: look at the screenshots.
+    @MainActor
+    func testHoldingDelete() throws {
+        let app = XCUIApplication()
+        app.launch()
+        startDemo(app)
+        open(app, "t5")
+        let showKeyboard = app.buttons["Show Keyboard"]
+        XCTAssertTrue(showKeyboard.waitForExistence(timeout: 5))
+        showKeyboard.tap()
+        let hint = app.buttons["Continue"]
+        if hint.waitForExistence(timeout: 2) { hint.tap() }
+        let delete = app.keys["delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 5), "the system keyboard shows")
+        app.typeText("some words to delete, and more of them")
+        sleep(1)
+        shot(app, "delete-0-typed")
+        delete.tap()
+        sleep(1)
+        shot(app, "delete-1-tapped")
+        delete.press(forDuration: 2)
+        sleep(1)
+        shot(app, "delete-2-held")
+    }
+
     /// Settings: the font preview, the demo button and About.
     @MainActor
     func testSettings() throws {

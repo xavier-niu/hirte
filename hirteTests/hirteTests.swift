@@ -159,3 +159,30 @@ struct ScrollGlideTests {
         #expect(abs(onward.travelLeft - 8) < 0.000001)
     }
 }
+
+@MainActor
+struct TerminalTextInputTests {
+    @Test func theDeleteKeyAlwaysHasSomethingToAskFor() throws {
+        let view = TerminalCanvasView()
+        #expect(view.hasText)
+        let selection = try #require(view.selectedTextRange)
+        #expect(view.text(in: selection) == "")
+    }
+
+    @Test func compositionLastsUntilCommitted() throws {
+        let view = TerminalCanvasView()
+        #expect(view.markedTextRange == nil)
+        view.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        let marked = try #require(view.markedTextRange)
+        #expect(view.text(in: marked) == "ni")
+        view.unmarkText()
+        #expect(view.markedTextRange == nil)
+    }
+
+    @Test func typingEndsAComposition() {
+        let view = TerminalCanvasView()
+        view.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        view.insertText("你")
+        #expect(view.markedTextRange == nil)
+    }
+}
